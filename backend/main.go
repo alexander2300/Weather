@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 )
 
 type WeatherResponse struct {
@@ -145,12 +147,82 @@ func weatherHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Println()
 }
 
+func getLANIP() (string, error) {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return "", err
+	}
+
+	for _, iface := range ifaces {
+		// Skip interfaces that are down or loopback
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue // skip interface if can't get addresses
+		}
+
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+
+			// Check for valid IPv4 LAN address
+			if ip == nil || ip.IsLoopback() {
+				continue
+			}
+			ip = ip.To4()
+			if ip == nil {
+				continue // not an IPv4 address
+			}
+
+			// Match private IP ranges
+			if isPrivateIP(ip) {
+				return ip.String(), nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf("no LAN IP found")
+}
+
+func isPrivateIP(ip net.IP) bool {
+	return ip.IsPrivate()
+}
+
 func main() {
 	http.HandleFunc("/weather", weatherHandler)
+
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
 	}
-	fmt.Printf("Server running on port %s\n", port)
-	log.Fatal(http.ListenAndServe(":"+port, nil))
+
+	num, err := strconv.Atoi(port)
+	if err != nil {
+		log.Fatalf("Invalid PORT: %v", err)
+	}
+
+	lanIP, err := getLANIP()
+	if err != nil {
+		log.Fatalf("Failed to get LAN IP: %v", err)
+	}
+
+	for {
+		portStr := strconv.Itoa(num)
+		fmt.Printf("Trying to start server on host %s, port %s\n", lanIP, portStr)
+		err := http.ListenAndServe(":"+portStr, nil)
+		if err != nil {
+			fmt.Printf("Port %s in use or failed: %v\n", portStr, err)
+			num++ // try next port
+		} else {
+			break // success (though in practice ListenAndServe blocks)
+		}
+	}
 }
